@@ -45,17 +45,13 @@ looked-up colors.
 
 ## Written in
 
-- **B4J** (B4X / Basic4Java) — RAD JavaFX desktop development by [Anywhere Software](https://www.b4x.com/).
-- Target: `AppType=JavaFX` desktop application.
+- **B4J** (B4X / B4J) — RAD JavaFX desktop development by [Anywhere Software](https://www.b4x.com/).
 
 ### B4J libraries
 
 `jcore`, `jfx`, `jxui`, `javaobject`.
 
 ## Java JARs used
-
-The RichTextFX editor stack is referenced via `#AdditionalJar:` in the project. The jars live in
-`C:\dev\b4x\b4j\ext_libs`:
 
 | JAR | Version | Purpose |
 | --- | --- | --- |
@@ -65,11 +61,5 @@ The RichTextFX editor stack is referenced via `#AdditionalJar:` in the project. 
 | wellbehavedfx | 0.3.3 | Event-handler / key-binding support for RichTextFX |
 | reactfx | 2.0-M5 | Reactive event streams used by RichTextFX |
 
-> Fallback: if a future JDK/JavaFX upgrade breaks richtextfx 0.11.7, drop to 0.11.2.
+See Libs-Jars folder  
 
-## Build / run
-
-- Project file: `Editor.b4j`.
-- Build in the **B4J IDE** (or via the b4j MCP tools). Output jar: `Objects/Editor.jar`.
-- Entry point: `AppStart` in `Editor.b4j` — the UI is built entirely in code (no layout file is
-  loaded).
