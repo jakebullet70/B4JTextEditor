@@ -1,0 +1,1193 @@
+﻿AppType=JavaFX
+Build1=Default,b4j.example
+File1=EditorShortcuts.md
+FileGroup1=Default Group
+Group=Default Group
+Library1=jcore
+Library2=jfx
+Library3=jxui
+Library4=javaobject
+Module1=CodeEditor
+Module2=Document
+Module3=FindBar
+Module4=formHelpers
+Module5=SetupBar
+Module6=SyntaxHL
+Module7=SyntaxLanguages
+Module8=ThisDocBar
+NumberOfFiles=1
+NumberOfLibraries=4
+NumberOfModules=8
+Version=10.5
+@EndOfDesignText@
+#Region Project Attributes
+	#MainFormWidth: 900
+	#MainFormHeight: 600
+	
+	#AdditionalJar: richtextfx-0.11.7
+	#AdditionalJar: flowless-0.7.4
+	#AdditionalJar: undofx-2.1.1
+	#AdditionalJar: wellbehavedfx-0.3.3
+	#AdditionalJar: reactfx-2.0-M5
+#End Region
+
+Sub Process_Globals
+	Private fx As JFX
+	Private MainForm As Form
+	Private xui As XUI
+	Private fhelper As formHelpers
+	Private Editor As CodeEditor            ' points at the ACTIVE document's editor (re-assigned on tab switch)
+	Private tabs As TabPane                 ' one tab per open document
+	Private Documents As List               ' List of Document, index-aligned with tabs.Tabs
+	Private mActiveIndex As Int = -1        ' index of the document currently mirrored into the globals below
+	Private mDocCounter As Int = 0          ' generates unique tab ids
+	Private CssUri As String                ' file URI of the shared syntax-highlight stylesheet
+	Private mb As MenuBar
+	Private mnuWrap As CheckMenuItem
+	Private lblStatus As Label
+	Private caretTimer As Timer
+	Private LastCaret As Int = -1
+	Private LastLen As Int = -1
+	Private Baseline As String = ""         ' last saved/loaded text - drives the modified flag
+	' These globals MIRROR the active Document (see SaveActiveTo / LoadActiveFrom).
+	Private CurrentPath As String = ""
+	Private CurrentDir As String = ""
+	Private Modified As Boolean = False
+	Private Eol As String = "CRLF"          ' "LF" or "CRLF"
+	Private Encoding As String = "UTF-8"
+	Private DocReadOnly As Boolean = False  ' active doc is read-only (file attr or user toggle)
+	Private DisplayName As String = ""      ' custom tab/title name (help doc); "" = use file name
+	Private Highlighter As SyntaxHL
+	Private Bar As FindBar
+	Private Setup As SetupBar
+	Private DocBar As ThisDocBar            ' "This Document" panel (active doc's encoding/EOL)
+	Private LastHLText As String = Chr(0)    ' last highlighted text (forces an initial highlight)
+	' Editor settings (persisted to CFG_FILE; applied to every open editor).
+	Private SettingTabSize As Int = 3
+	Private SettingLineNumbers As Boolean = True
+	Private SettingEol As String = "CRLF"   ' default line ending for new documents
+	Private SettingFontFamily As String = "Consolas"
+	Private SettingFontSize As Int = 14
+	Private SettingSoftTabs As Boolean = True   ' True = Tab inserts spaces; False = real tab char
+	Private SettingWordWrap As Boolean = False
+	Private SettingTheme As String = "Light"    ' "Light" or "Dark"
+	Private SettingEncoding As String = "UTF-8" ' default encoding for new docs / no-BOM opened files
+	Private SettingHighlightLine As Boolean = True
+	Private SettingAutoIndent As Boolean = True
+	Private mThemeCounter As Int = 0            ' unique stylesheet filename per theme apply (cache-bust)
+	Private RecentFiles As List                 ' MRU file paths (most recent first), persisted
+	Private mRecent As Menu                     ' File > Open Recent submenu (rebuilt on change)
+	Private Const RECENT_FILE As String = "recent.txt"
+	Private Const RECENT_MAX As Int = 10
+	Private Const APP_NAME As String = "B4J Editor"
+	Private Const POS_FILE As String = "window.properties"
+	Private Const CFG_FILE As String = "settings.properties"
+	Private Const MENU_H As Double = 28
+	Private Const STATUS_H As Double = 24
+End Sub
+
+Sub AppStart (Form1 As Form, Args() As String)
+	MainForm = Form1
+	fhelper.Initialize(MainForm)
+	LoadSettings                                ' restore tab size / line-numbers before the first doc
+	LoadRecent                                  ' restore the recent-files list before the menu is built
+	BuildUI                                     ' builds directly on MainForm.RootPane (an AnchorPane)
+	NewDoc                                       ' start with one empty Untitled tab
+
+	caretTimer.Initialize("caretTimer", 150)
+	caretTimer.Enabled = True
+	MainForm.Show
+	fhelper.LoadFormPosition(File.DirData(APP_NAME), POS_FILE)   ' restore last window position/size
+	fhelper.InstallFileDrop                      ' enable drag-drop to open (scene exists after Show)
+	fhelper.SetSceneStylesheet(CssUri)           ' apply the theme to the whole window chrome
+	UpdateStatus
+	Editor.RequestFocus
+End Sub
+
+' Opens a file dropped onto the window (routed from formHelpers).
+Public Sub OpenDroppedFile (path As String)
+	If File.Exists(GetParentDir(path), GetName(path)) Then OpenDoc(path)
+End Sub
+
+' Persists the window position/size whenever the app closes (any path).
+Sub MainForm_Closed
+	fhelper.SaveFormPosition(File.DirData(APP_NAME), POS_FILE)
+End Sub
+
+#Region UI construction
+Sub BuildUI
+	InstallTheme              ' writes the theme CSS and sets CssUri (applied per-document editor)
+	Highlighter.Initialize
+	Documents.Initialize
+
+	' Tabbed editor area fills between the menu bar (top) and status bar (bottom).
+	tabs.Initialize("tabs")
+	' Show the close (X) on every tab, not just the selected one.
+	Dim tpjo As JavaObject = tabs
+	Dim closePolicy As JavaObject
+	closePolicy.InitializeStatic("javafx.scene.control.TabPane$TabClosingPolicy")
+	tpjo.RunMethod("setTabClosingPolicy", Array(closePolicy.GetField("ALL_TABS")))
+	MainForm.RootPane.AddNode(tabs, 0, MENU_H, 900, 548)
+	SetAnchors(tabs, MENU_H, 0.0, STATUS_H, 0.0)
+
+	' Status bar pinned to the bottom, full width.
+	lblStatus.Initialize("")
+	lblStatus.Style = "-fx-background-color: -fx-background; -fx-text-fill: -fx-text-base-color; -fx-padding: 4 10 4 10; -fx-font-family: 'Segoe UI'; -fx-font-size: 12;"
+	MainForm.RootPane.AddNode(lblStatus, 0, 576, 900, STATUS_H)
+	lblStatus.PrefHeight = STATUS_H
+	SetAnchors(lblStatus, Null, 0.0, 0.0, 0.0)
+
+	' Menu bar pinned to the top, full width.
+	BuildMenuBar
+	MainForm.RootPane.AddNode(mb, 0, 0, 900, MENU_H)
+	mb.PrefHeight = MENU_H
+	SetAnchors(mb, 0.0, 0.0, Null, 0.0)
+
+	' Floating find/replace bar, pinned top-right over the editor (hidden until Ctrl+F / Ctrl+R).
+	Bar.Initialize(Highlighter)
+	Dim bp As Pane = Bar.AsPanel
+	MainForm.RootPane.AddNode(bp, 420, MENU_H + 8, bp.PrefWidth, bp.PrefHeight)
+	SetAnchors(bp, MENU_H + 8, 18.0, Null, Null)
+
+	' Floating Setup panel, pinned top-right (hidden until Help > Setup). Use the panel's own pref
+	' size so its height stays the single source of truth (SetupBar.H).
+	Setup.Initialize
+	Dim sp As Pane = Setup.AsPanel
+	MainForm.RootPane.AddNode(sp, 630, MENU_H + 8, sp.PrefWidth, sp.PrefHeight)
+	SetAnchors(sp, MENU_H + 8, 18.0, Null, Null)
+
+	' Floating "This Document" panel, pinned top-right (hidden until View > This Document).
+	DocBar.Initialize
+	Dim dp As Pane = DocBar.AsPanel
+	MainForm.RootPane.AddNode(dp, 580, MENU_H + 8, dp.PrefWidth, dp.PrefHeight)
+	SetAnchors(dp, MENU_H + 8, 18.0, Null, Null)
+
+	ApplyChromeBase           ' theme the menu/tabs/controls via inline base colors on the root
+End Sub
+
+#Region Documents / tabs
+' Creates a new empty document in a new tab and switches to it.
+Sub NewDoc
+	Dim d As Document
+	d.Initialize(CssUri)
+	d.eol = SettingEol                                   ' new docs start with the default line ending
+	d.encoding = SettingEncoding                         ' ...and the default encoding
+	ApplySettings(d.editor)                              ' tab size + line-numbers for this editor
+	Dim tp As TabPage : tp.Initialize
+	Dim tj As JavaObject = tp
+	tj.RunMethod("setContent", Array(d.editor.AsNode))   ' tab content fills automatically
+	tj.RunMethod("setClosable", Array(True))             ' show the X (intercepted for a save prompt)
+	mDocCounter = mDocCounter + 1
+	Dim docId As String = "doc" & mDocCounter
+	tp.Id = docId
+	d.id = docId
+	tp.Text = "Untitled"
+	tp.Tag = d
+	d.page = tp
+	d.AttachClose                                        ' route the X through TabCloseRequest
+	Documents.Add(d)
+	tabs.Tabs.Add(tp)
+	tabs.SelectedIndex = Documents.Size - 1
+	SwitchTo(Documents.Size - 1)
+End Sub
+
+' Opens a file. Reuses the active tab if it's a pristine Untitled (empty, unmodified, no path);
+' otherwise opens a new tab.
+Sub OpenDoc (path As String)
+	If CurrentPath = "" And Modified = False And Editor.TextLength = 0 Then
+		LoadFile(path)        ' reuse the current empty Untitled tab
+	Else
+		NewDoc
+		LoadFile(path)
+	End If
+End Sub
+
+' Persists the global mirror into Document idx, then makes idx the active document.
+Sub SwitchTo (idx As Int)
+	If idx < 0 Or idx >= Documents.Size Then Return
+	If mActiveIndex >= 0 And mActiveIndex < Documents.Size And mActiveIndex <> idx Then
+		SaveActiveTo(Documents.Get(mActiveIndex))
+	End If
+	mActiveIndex = idx
+	LoadActiveFrom(Documents.Get(idx))
+End Sub
+
+' Raised when the user clicks a different tab.
+Sub tabs_TabChanged (SelectedTab As TabPage)
+	Dim idx As Int = tabs.SelectedIndex
+	If idx = mActiveIndex Then Return
+	SwitchTo(idx)
+End Sub
+
+Sub SaveActiveTo(d As Document)
+	d.path = CurrentPath
+	d.dir = CurrentDir
+	d.modified = Modified
+	d.eol = Eol
+	d.encoding = Encoding
+	d.readonly = DocReadOnly
+	d.displayName = DisplayName
+	d.baseline = Baseline
+	d.lastHLText = LastHLText
+	d.langName = Highlighter.CurrentName
+End Sub
+
+Sub LoadActiveFrom(d As Document)
+	Editor = d.editor                ' all later Editor.* calls target this document
+	CurrentPath = d.path
+	CurrentDir = d.dir
+	Modified = d.modified
+	Eol = d.eol
+	Encoding = d.encoding
+	DocReadOnly = d.readonly
+	DisplayName = d.displayName
+	Baseline = d.baseline
+	LastHLText = d.lastHLText
+	LastCaret = -1                   ' force the next caretTimer tick to refresh the status bar
+	LastLen = -1
+	Editor.SetEditable(Not(DocReadOnly))
+	Highlighter.SetEditor(Editor)
+	Highlighter.SetLanguageByName(d.langName)
+	Bar.SetEditor(Editor)
+	If DocBar.IsVisible Then DocBar.RefreshPerDoc(Encoding, Eol, DocReadOnly)   ' keep an open panel on the active doc
+	UpdateTitle
+	UpdateStatus
+	Editor.RequestFocus
+End Sub
+
+Sub mnuClose_Action
+	If Documents.Size = 0 Then Return
+	Wait For (ConfirmDiscard) Complete (proceed As Boolean)
+	If proceed Then CloseActiveDoc
+End Sub
+
+' Called (from Document's inline-Java close handler) when a tab's X is clicked.
+Public Sub TabCloseRequest (tabId As String)
+	Dim idx As Int = IndexOfDocId(tabId)
+	If idx < 0 Then Return
+	tabs.SelectedIndex = idx           ' make the clicked tab active, then prompt + close it
+	SwitchTo(idx)
+	Wait For (ConfirmDiscard) Complete (proceed As Boolean)
+	If proceed Then CloseActiveDoc
+End Sub
+
+Sub IndexOfDocId (tabId As String) As Int
+	For i = 0 To Documents.Size - 1
+		Dim d As Document = Documents.Get(i)
+		If d.id = tabId Then Return i
+	Next
+	Return -1
+End Sub
+
+Sub CloseActiveDoc
+	Dim idx As Int = mActiveIndex
+	If idx < 0 Then Return
+	tabs.Tabs.RemoveAt(idx)
+	Documents.RemoveAt(idx)
+	mActiveIndex = -1                ' discard the closed doc; force a clean reload of the neighbour
+	If Documents.Size = 0 Then
+		NewDoc
+	Else
+		Dim ni As Int = idx
+		If ni >= Documents.Size Then ni = Documents.Size - 1
+		tabs.SelectedIndex = ni
+		SwitchTo(ni)
+	End If
+End Sub
+
+' Updates the active tab header to "<name>" or "*<name>" when modified.
+Sub UpdateActiveTabText
+	If mActiveIndex < 0 Or mActiveIndex >= Documents.Size Then Return
+	Dim d As Document = Documents.Get(mActiveIndex)
+	Dim star As String = ""
+	If Modified Then star = "*"
+	d.page.Text = star & DocName
+End Sub
+
+' True if the active document or any other open document has unsaved changes.
+Sub AnyModified As Boolean
+	If mActiveIndex >= 0 And mActiveIndex < Documents.Size Then SaveActiveTo(Documents.Get(mActiveIndex))
+	For Each d As Document In Documents
+		If d.modified Then Return True
+	Next
+	Return False
+End Sub
+
+' --- Cross-document access for the find bar (All tabs) ---
+Public Sub DocCount As Int
+	Return Documents.Size
+End Sub
+
+Public Sub DocEditorAt (i As Int) As CodeEditor
+	Dim d As Document = Documents.Get(i)
+	Return d.editor
+End Sub
+
+Public Sub ActiveDocIndex As Int
+	Return mActiveIndex
+End Sub
+
+' Switch to document i (tab selection + global mirror); used by cross-doc Find.
+Public Sub GoToDoc (i As Int)
+	If i < 0 Or i >= Documents.Size Or i = mActiveIndex Then Return
+	tabs.SelectedIndex = i
+	SwitchTo(i)
+End Sub
+
+' Flags document i modified after a cross-doc Replace All (updates flag + tab star).
+Public Sub NoteDocChanged (i As Int)
+	If i < 0 Or i >= Documents.Size Then Return
+	Dim d As Document = Documents.Get(i)
+	d.modified = True
+	If i = mActiveIndex Then
+		SetModified(True)
+	Else
+		Dim nm As String = "Untitled"
+		If d.path <> "" Then nm = GetName(d.path)
+		d.page.Text = "*" & nm
+	End If
+End Sub
+#End Region
+
+' Applies JavaFX AnchorPane constraints so a child resizes with the form.
+' Pass Null for any side that should not be anchored.
+Sub SetAnchors (node As Object, top As Object, right As Object, bottom As Object, left As Object)
+	Dim child As JavaObject = node
+	Dim ap As JavaObject
+	ap.InitializeStatic("javafx.scene.layout.AnchorPane")
+	If top <> Null Then ap.RunMethod("setTopAnchor", Array(child, top))
+	If right <> Null Then ap.RunMethod("setRightAnchor", Array(child, right))
+	If bottom <> Null Then ap.RunMethod("setBottomAnchor", Array(child, bottom))
+	If left <> Null Then ap.RunMethod("setLeftAnchor", Array(child, left))
+End Sub
+
+
+Sub BuildMenuBar
+	mb.Initialize("mb")
+	Dim mFile As Menu
+	mFile.Initialize("_File", "")     ' leading underscore = Alt+F mnemonic
+	AddItem(mFile, "_New", "mnuNew", "Shortcut+N")
+	AddItem(mFile, "_Open...", "mnuOpen", "Shortcut+O")
+	AddItem(mFile, "_Save", "mnuSave", "Shortcut+S")
+	AddItem(mFile, "Save _As...", "mnuSaveAs", "Shortcut+Shift+S")
+	AddItem(mFile, "_Close Tab", "mnuClose", "Shortcut+W")
+	AddItem(mFile, "E_xit", "mnuExit", "Shortcut+Q")
+	AddSeparator(mFile)                        ' divider, then the recent files below it
+	mRecent.Initialize("Open _Recent", "")     ' submenu, populated by RebuildRecentMenu
+	mFile.MenuItems.Add(mRecent)
+	mb.Menus.Add(mFile)
+
+	Dim mEdit As Menu
+	mEdit.Initialize("_Edit", "")     ' Alt+E
+	AddItem(mEdit, "_Undo", "mnuUndo", "Shortcut+Z")
+	AddItem(mEdit, "_Redo", "mnuRedo", "Shortcut+Y")
+	AddItem(mEdit, "Cu_t", "mnuCut", "Shortcut+X")
+	AddItem(mEdit, "_Copy", "mnuCopy", "Shortcut+C")
+	AddItem(mEdit, "_Paste", "mnuPaste", "Shortcut+V")
+	AddItem(mEdit, "Select _All", "mnuSelectAll", "Shortcut+A")
+	AddItem(mEdit, "_Find...", "mnuFind", "Shortcut+F")
+	AddItem(mEdit, "Find _Next", "mnuFindNext", "F3")
+	AddItem(mEdit, "Rep_lace...", "mnuReplace", "Shortcut+R")
+	AddItem(mEdit, "_Go to Line...", "mnuGoto", "Shortcut+G")
+	mb.Menus.Add(mEdit)
+
+	Dim mView As Menu
+	mView.Initialize("_View", "")     ' Alt+V
+	mnuWrap.Initialize("_Word Wrap", "mnuWrap")
+	mnuWrap.Selected = SettingWordWrap     ' reflect the persisted default
+	SetAccelerator(mnuWrap, "Alt+Z")
+	mView.MenuItems.Add(mnuWrap)
+	AddItem(mView, "This _Document...", "mnuThisDoc", "")   ' active doc's encoding / line endings
+	' Language submenu (auto-detected on Open; selectable manually here).
+	Dim mLang As Menu
+	mLang.Initialize("_Language", "")
+	AddLangItem(mLang, "Plain")
+	For Each nm As String In Highlighter.Names
+		AddLangItem(mLang, nm)
+	Next
+	mView.MenuItems.Add(mLang)
+	mb.Menus.Add(mView)
+
+	Dim mHelp As Menu
+	mHelp.Initialize("_Help", "")     ' Alt+H
+	AddItem(mHelp, "_Setup...", "mnuSetup", "")
+	AddItem(mHelp, "Editor _Shortcuts", "mnuShortcuts", "")
+	AddItem(mHelp, "_About", "mnuAbout", "")
+	mb.Menus.Add(mHelp)
+
+	RebuildRecentMenu                  ' fill the Open Recent submenu from the loaded list
+End Sub
+
+Sub AddItem (m As Menu, text As String, event As String, accel As String) As MenuItem
+	Dim mi As MenuItem
+	mi.Initialize(text, event)
+	m.MenuItems.Add(mi)
+	If accel <> "" Then SetAccelerator(mi, accel)
+	Return mi
+End Sub
+
+' Appends a horizontal divider to a menu (native SeparatorMenuItem; Menu.getItems() is reflection-safe
+' unlike Pane.getChildren()).
+Sub AddSeparator (m As Menu)
+	Dim sep As JavaObject
+	sep.InitializeNewInstance("javafx.scene.control.SeparatorMenuItem", Null)
+	Dim mjo As JavaObject = m
+	mjo.RunMethodJO("getItems", Null).RunMethod("add", Array(sep))
+End Sub
+
+Sub AddLangItem (m As Menu, langName As String)
+	Dim mi As MenuItem
+	mi.Initialize(langName, "mnuLang")
+	mi.Tag = langName
+	m.MenuItems.Add(mi)
+End Sub
+
+' Sets a keyboard accelerator on a (Check)MenuItem via JavaFX KeyCombination.
+Sub SetAccelerator (item As Object, accel As String)
+	Dim kcStatic As JavaObject
+	kcStatic.InitializeStatic("javafx.scene.input.KeyCombination")
+	Dim kc As Object = kcStatic.RunMethod("keyCombination", Array(accel))
+	Dim jmi As JavaObject = item
+	jmi.RunMethod("setAccelerator", Array(kc))
+End Sub
+
+#End Region
+
+#Region File operations
+Sub mnuNew_Action
+	NewDoc
+End Sub
+
+Sub mnuOpen_Action
+	Dim fc As FileChooser
+	fc.Initialize
+	fc.Title = "Open"
+	If CurrentDir <> "" Then fc.InitialDirectory = CurrentDir
+	Dim path As String = fc.ShowOpen(MainForm)
+	If path = "" Then Return
+	OpenDoc(path)
+End Sub
+
+#Region Recent files
+' Opens a file chosen from File > Open Recent (path carried in the menu item's Tag).
+Sub mnuRecent_Action
+	Dim mi As MenuItem = Sender
+	Dim path As String = mi.Tag
+	If File.Exists(GetParentDir(path), GetName(path)) Then
+		OpenDoc(path)
+	Else
+		xui.MsgboxAsync("File not found:" & CRLF & path, APP_NAME)
+		RemoveRecent(path)
+		SaveRecent
+		RebuildRecentMenu
+	End If
+End Sub
+
+Sub mnuClearRecent_Action
+	RecentFiles.Initialize
+	SaveRecent
+	RebuildRecentMenu
+End Sub
+
+Sub mnuRecentNone_Action
+	' placeholder item when the list is empty - no action
+End Sub
+
+' Moves a path to the top of the MRU list (deduped, capped), persists, and rebuilds the menu.
+Sub AddRecent (path As String)
+	RemoveRecent(path)
+	RecentFiles.InsertAt(0, path)
+	Do While RecentFiles.Size > RECENT_MAX
+		RecentFiles.RemoveAt(RecentFiles.Size - 1)
+	Loop
+	SaveRecent
+	RebuildRecentMenu
+End Sub
+
+' Removes any (case-insensitive) occurrence of path from the list.
+Sub RemoveRecent (path As String)
+	For i = RecentFiles.Size - 1 To 0 Step -1
+		Dim p As String = RecentFiles.Get(i)
+		If p.ToLowerCase = path.ToLowerCase Then RecentFiles.RemoveAt(i)
+	Next
+End Sub
+
+Sub LoadRecent
+	RecentFiles.Initialize
+	Dim dir As String = File.DirData(APP_NAME)
+	If File.Exists(dir, RECENT_FILE) Then
+		Try
+			RecentFiles = File.ReadList(dir, RECENT_FILE)
+		Catch
+			Log(LastException)
+			RecentFiles.Initialize
+		End Try
+	End If
+End Sub
+
+Sub SaveRecent
+	Try
+		File.WriteList(File.DirData(APP_NAME), RECENT_FILE, RecentFiles)
+	Catch
+		Log(LastException)
+	End Try
+End Sub
+
+' Repopulates the Open Recent submenu (one item per path + Clear; a placeholder when empty).
+Sub RebuildRecentMenu
+	Do While mRecent.MenuItems.Size > 0
+		mRecent.MenuItems.RemoveAt(0)
+	Loop
+	If RecentFiles.Size = 0 Then
+		Dim miNone As MenuItem
+		miNone.Initialize("(no recent files)", "mnuRecentNone")
+		mRecent.MenuItems.Add(miNone)
+		Return
+	End If
+	For Each p As String In RecentFiles
+		Dim mi As MenuItem
+		mi.Initialize(p, "mnuRecent")
+		mi.Tag = p
+		mRecent.MenuItems.Add(mi)
+	Next
+	Dim miClear As MenuItem
+	miClear.Initialize("Clear Recent List", "mnuClearRecent")
+	mRecent.MenuItems.Add(miClear)
+End Sub
+#End Region
+
+Sub LoadFile (path As String)
+	Dim dir As String = GetParentDir(path)
+	Dim name As String = GetName(path)
+	Dim data() As Byte
+	Try
+		data = File.ReadBytes(dir, name)
+	Catch
+		Log(LastException)
+		xui.MsgboxAsync("Could not read file:" & CRLF & path, APP_NAME)
+		Return
+	End Try
+	Encoding = DetectEncoding(data, SettingEncoding)   ' BOM wins; else the configured default
+	Dim raw As String = DecodeBytes(data, Encoding)
+	If raw.Contains(Chr(13) & Chr(10)) Then
+		Eol = "CRLF"
+	Else
+		Eol = "LF"
+	End If
+	Editor.Text = raw            ' programmatic set - does not flag Modified (CodeArea normalizes to LF)
+	Editor.ScrollToTop           ' replaceText leaves the view at the bottom; show the top of the file
+	CurrentPath = path
+	CurrentDir = dir
+	DisplayName = ""             ' a real file uses its file name
+	DocReadOnly = (CanWrite(path) = False)   ' respect the file's read-only attribute (Win + Linux)
+	Editor.SetEditable(Not(DocReadOnly))
+	Highlighter.SetLanguageByExtension(GetExt(name))
+	Highlighter.Highlight(raw)
+	LastHLText = raw
+	SetBaseline
+	UpdateActiveTabText
+	UpdateStatus
+	AddRecent(path)
+End Sub
+
+' True if the file at path is writable (java.io.File.canWrite - honours Windows read-only attribute
+' and Linux write permission).
+Sub CanWrite (path As String) As Boolean
+	Dim jf As JavaObject
+	jf.InitializeNewInstance("java.io.File", Array(path))
+	Return jf.RunMethod("canWrite", Null)
+End Sub
+
+Sub mnuSave_Action
+	SaveFile(False)
+End Sub
+
+Sub mnuSaveAs_Action
+	SaveFile(True)
+End Sub
+
+Sub SaveFile(forceDialog As Boolean) As ResumableSub
+	Dim path As String = CurrentPath
+	If forceDialog Or path = "" Then
+		Dim fc As FileChooser
+		fc.Initialize
+		fc.Title = "Save As"
+		If CurrentDir <> "" Then fc.InitialDirectory = CurrentDir
+		If CurrentPath <> "" Then fc.InitialFileName = GetName(CurrentPath)
+		path = fc.ShowSave(MainForm)
+		If path = "" Then Return False
+	End If
+	Dim content As String = Editor.Text     ' uses LF internally
+	If Eol = "CRLF" Then content = content.Replace(Chr(10), Chr(13) & Chr(10))
+	Dim dir As String = GetParentDir(path)
+	Dim name As String = GetName(path)
+	Try
+		File.WriteBytes(dir, name, EncodeText(content, Encoding))   ' apply encoding + BOM
+	Catch
+		Log(LastException)
+		xui.MsgboxAsync("Could not write file:" & CRLF & path, APP_NAME)
+		Return False
+	End Try
+	CurrentPath = path
+	CurrentDir = dir
+	SetBaseline
+	UpdateActiveTabText
+	AddRecent(path)
+	Return True
+End Sub
+
+Sub mnuExit_Action
+	PromptThenClose
+End Sub
+
+' Intercepts the window close (X) button to guard unsaved changes across all tabs.
+Sub MainForm_CloseRequest(EventData As Event)
+	If AnyModified = False Then Return
+	Dim jo As JavaObject = EventData
+	jo.RunMethod("consume", Null)               ' cancel the close; we'll decide below
+	PromptThenClose
+End Sub
+
+Sub PromptThenClose
+	Wait For (ConfirmExit) Complete (proceed As Boolean)
+	If proceed Then
+		' clear modified flags so the close isn't re-intercepted
+		Modified = False
+		For Each d As Document In Documents
+			d.modified = False
+		Next
+		MainForm.Close
+	End If
+End Sub
+
+' Whole-app exit guard: prompts per unsaved document (Save / Don't Save / Cancel for each).
+' Cancelling any one aborts the exit. AnyModified first flushes the active doc's globals into its
+' Document so every d.modified flag is current.
+Sub ConfirmExit As ResumableSub
+	If AnyModified = False Then Return True
+	For i = 0 To Documents.Size - 1
+		Dim d As Document = Documents.Get(i)
+		If d.modified Then
+			tabs.SelectedIndex = i
+			SwitchTo(i)                 ' mirror this doc into the globals so ConfirmDiscard targets it
+			Wait For (ConfirmDiscard) Complete (proceed As Boolean)
+			If proceed = False Then Return False    ' user cancelled - abort the whole exit
+		End If
+	Next
+	Return True
+End Sub
+
+' Returns True if it's safe to discard the current document (saved, unmodified, or user agreed).
+Sub ConfirmDiscard As ResumableSub
+	If Not(Modified) Then Return True
+	Dim sf As Object = xui.Msgbox2Async("Save changes to " & DocName & "?", APP_NAME, "Save", "Cancel", "Don't Save", Null)
+	Wait For (sf) Msgbox_Result (res As Int)
+	If res = xui.DialogResponse_Positive Then
+		Wait For (SaveFile(False)) Complete (saved As Boolean)
+		Return saved
+	Else If res = xui.DialogResponse_Negative Then
+		Return True
+	Else
+		Return False
+	End If
+End Sub
+#End Region
+
+#Region Edit operations
+Sub mnuUndo_Action
+	Editor.Undo
+End Sub
+
+Sub mnuRedo_Action
+	Editor.Redo
+End Sub
+
+Sub mnuCut_Action
+	Editor.Cut
+End Sub
+
+Sub mnuCopy_Action
+	Editor.Copy
+End Sub
+
+Sub mnuPaste_Action
+	Editor.Paste
+End Sub
+
+Sub mnuSelectAll_Action
+	Editor.SelectAll
+End Sub
+#End Region
+
+#Region Find
+Sub mnuFind_Action
+	Bar.ShowFind
+End Sub
+
+Sub mnuFindNext_Action
+	Bar.FindNextOrShow
+End Sub
+
+Sub mnuReplace_Action
+	Bar.ShowReplace
+End Sub
+
+Sub mnuGoto_Action
+	Dim s As String = InputDialog("Go to Line", "Line number:", "")
+	If s = "" Or IsNumber(s) = False Then Return
+	Dim line As Int = s
+	Dim maxLines As Int = CountLines(Editor.Text)
+	If line < 1 Then line = 1
+	If line > maxLines Then line = maxLines
+	Editor.GotoLine(line - 1)
+	Editor.RequestFocus
+End Sub
+
+Sub CountLines (t As String) As Int
+	Dim n As Int = 1
+	Dim i As Int = t.IndexOf(Chr(10))
+	Do While i <> -1
+		n = n + 1
+		i = t.IndexOf2(Chr(10), i + 1)
+	Loop
+	Return n
+End Sub
+
+' Modal text-input dialog via JavaFX TextInputDialog (no extra library needed).
+Sub InputDialog (title As String, header As String, initial As String) As String
+	Dim d As JavaObject
+	d.InitializeNewInstance("javafx.scene.control.TextInputDialog", Array(initial))
+	d.RunMethod("setTitle", Array(title))
+	d.RunMethod("setHeaderText", Array(header))
+	Dim opt As JavaObject = d.RunMethod("showAndWait", Null)
+	If opt.RunMethod("isPresent", Null) Then Return opt.RunMethod("get", Null)
+	Return ""
+End Sub
+#End Region
+
+#Region View / status
+Sub mnuWrap_Action
+	SetWordWrap(mnuWrap.Selected)   ' persist + apply to all editors (also keeps the Setup panel in step)
+End Sub
+
+Sub mnuThisDoc_Action
+	DocBar.Show(Encoding, Eol, DocReadOnly)   ' active document's encoding / line endings / read-only
+End Sub
+
+' Manual language pick from View > Language. Sender is the chosen MenuItem.
+Sub mnuLang_Action
+	Dim mi As MenuItem = Sender
+	Highlighter.SetLanguageByName(mi.Tag)
+	Highlighter.Highlight(Editor.Text)
+	LastHLText = Editor.Text
+	UpdateStatus
+End Sub
+
+Sub mnuAbout_Action
+	xui.MsgboxAsync("Editor " & "1.0" & CRLF & CRLF & "A B4J desktop text editor.", "About " & APP_NAME)
+End Sub
+
+' Opens the bundled editor-shortcuts markdown in a new read-only tab.
+Sub mnuShortcuts_Action
+	Dim content As String
+	Try
+		content = File.ReadString(File.DirAssets, "EditorShortcuts.md")
+	Catch
+		Log(LastException)
+		content = "Editor shortcuts file not found."
+	End Try
+	OpenHelpDoc("Editor Shortcuts", content)
+End Sub
+
+' Opens read-only text in a new tab with a custom title (used for the help/shortcuts doc).
+Sub OpenHelpDoc (title As String, content As String)
+	NewDoc
+	Editor.Text = content
+	Editor.ScrollToTop
+	DisplayName = title
+	Highlighter.SetLanguageByName("Markdown")
+	Highlighter.Highlight(content)
+	LastHLText = content
+	SetReadOnly(True)
+	SetBaseline                ' clean - no save prompt; refreshes the tab text via DisplayName
+End Sub
+
+Sub mnuSetup_Action
+	' Global settings only; per-document encoding/EOL live in the This Document panel.
+	Setup.Show(CreateMap( _
+		"theme": SettingTheme, "fontfamily": SettingFontFamily, "fontsize": SettingFontSize, _
+		"tabsize": SettingTabSize, "softtabs": SettingSoftTabs, "linenumbers": SettingLineNumbers, _
+		"wordwrap": SettingWordWrap, "highlightline": SettingHighlightLine, "autoindent": SettingAutoIndent, _
+		"defenc": SettingEncoding, "defeol": SettingEol))
+End Sub
+
+' --- Editor settings (tab size, line numbers) ---
+' Called by SetupBar when the user edits a value: update, apply to all editors, persist.
+Public Sub SetTabSize (n As Int)
+	SettingTabSize = n
+	ApplySettingsAll
+	SaveSettings
+End Sub
+
+Public Sub SetLineNumbers (b As Boolean)
+	SettingLineNumbers = b
+	ApplySettingsAll
+	SaveSettings
+End Sub
+
+' --- Per-document (active tab) ---
+' Sets the active document's line ending (used on its next save).
+Public Sub SetEol (e As String)
+	Eol = e
+	If mActiveIndex >= 0 And mActiveIndex < Documents.Size Then
+		Dim d As Document = Documents.Get(mActiveIndex)
+		d.eol = e
+	End If
+	UpdateStatus
+End Sub
+
+' Sets the active document's encoding (used on its next save).
+Public Sub SetEncoding (e As String)
+	Encoding = e
+	If mActiveIndex >= 0 And mActiveIndex < Documents.Size Then
+		Dim d As Document = Documents.Get(mActiveIndex)
+		d.encoding = e
+	End If
+	UpdateStatus
+End Sub
+
+' Toggles read-only on the active document (blocks edits; shown in the status bar).
+Public Sub SetReadOnly (b As Boolean)
+	DocReadOnly = b
+	If mActiveIndex >= 0 And mActiveIndex < Documents.Size Then
+		Dim d As Document = Documents.Get(mActiveIndex)
+		d.readonly = b
+	End If
+	Editor.SetEditable(Not(b))
+	UpdateStatus
+End Sub
+
+' --- Defaults for new documents (persisted) ---
+Public Sub SetDefaultEol (e As String)
+	SettingEol = e
+	SaveSettings
+End Sub
+
+Public Sub SetDefaultEncoding (e As String)
+	SettingEncoding = e
+	SaveSettings
+End Sub
+
+Public Sub SetFontFamily (f As String)
+	SettingFontFamily = f
+	ApplySettingsAll
+	SaveSettings
+End Sub
+
+Public Sub SetFontSize (n As Int)
+	SettingFontSize = n
+	ApplySettingsAll
+	SaveSettings
+End Sub
+
+Public Sub SetSoftTabs (b As Boolean)
+	SettingSoftTabs = b
+	ApplySettingsAll
+	SaveSettings
+End Sub
+
+Public Sub SetWordWrap (b As Boolean)
+	SettingWordWrap = b
+	mnuWrap.Selected = b                ' keep the View menu check in sync (panel may have changed it)
+	ApplySettingsAll
+	SaveSettings
+End Sub
+
+Public Sub SetHighlightLine (b As Boolean)
+	SettingHighlightLine = b
+	ApplySettingsAll
+	SaveSettings
+End Sub
+
+Public Sub SetAutoIndent (b As Boolean)
+	SettingAutoIndent = b
+	ApplySettingsAll
+	SaveSettings
+End Sub
+
+Sub ApplySettings (ed As CodeEditor)
+	ed.SetTabSize(SettingTabSize)
+	ed.SetLineNumbers(SettingLineNumbers)
+	ed.SetFont(SettingFontFamily, SettingFontSize)
+	ed.SetSoftTabs(SettingSoftTabs)
+	ed.SetWrap(SettingWordWrap)
+	ed.SetAutoIndent(SettingAutoIndent)
+	ed.SetHighlightLine(SettingHighlightLine)
+End Sub
+
+Sub ApplySettingsAll
+	For Each d As Document In Documents
+		ApplySettings(d.editor)
+	Next
+End Sub
+
+Sub LoadSettings
+	Dim dir As String = File.DirData(APP_NAME)
+	If File.Exists(dir, CFG_FILE) Then
+		Try
+			Dim m As Map = File.ReadMap(dir, CFG_FILE)
+			If m.ContainsKey("tabsize") Then SettingTabSize = m.Get("tabsize")
+			If m.ContainsKey("linenumbers") Then SettingLineNumbers = (m.Get("linenumbers") = "true")
+			If m.ContainsKey("eol") Then SettingEol = m.Get("eol")
+			If m.ContainsKey("fontfamily") Then SettingFontFamily = m.Get("fontfamily")
+			If m.ContainsKey("fontsize") Then SettingFontSize = m.Get("fontsize")
+			If m.ContainsKey("softtabs") Then SettingSoftTabs = (m.Get("softtabs") = "true")
+			If m.ContainsKey("wordwrap") Then SettingWordWrap = (m.Get("wordwrap") = "true")
+			If m.ContainsKey("theme") Then SettingTheme = m.Get("theme")
+			If m.ContainsKey("encoding") Then SettingEncoding = m.Get("encoding")
+			If m.ContainsKey("highlightline") Then SettingHighlightLine = (m.Get("highlightline") = "true")
+			If m.ContainsKey("autoindent") Then SettingAutoIndent = (m.Get("autoindent") = "true")
+		Catch
+			Log(LastException)
+		End Try
+	End If
+	If SettingTabSize < 1 Or SettingTabSize > 16 Then SettingTabSize = 3   ' guard bad/old values
+	If SettingEol <> "LF" Then SettingEol = "CRLF"                          ' guard bad/old values
+	If SettingFontSize < 6 Or SettingFontSize > 72 Then SettingFontSize = 14
+	If SettingFontFamily = "" Then SettingFontFamily = "Consolas"
+	If SettingTheme <> "Dark" Then SettingTheme = "Light"
+	If EncodingNames.IndexOf(SettingEncoding) < 0 Then SettingEncoding = "UTF-8"
+End Sub
+
+Sub SaveSettings
+	Dim m As Map = CreateMap( _
+		"tabsize": SettingTabSize, "linenumbers": SettingLineNumbers, "eol": SettingEol, _
+		"fontfamily": SettingFontFamily, "fontsize": SettingFontSize, _
+		"softtabs": SettingSoftTabs, "wordwrap": SettingWordWrap, _
+		"theme": SettingTheme, "encoding": SettingEncoding, _
+		"highlightline": SettingHighlightLine, "autoindent": SettingAutoIndent)
+	Try
+		File.WriteMap(File.DirData(APP_NAME), CFG_FILE, m)
+	Catch
+		Log(LastException)
+	End Try
+End Sub
+
+' Polls caret/length each tick; on any activity it refreshes Ln/Col and recomputes the modified
+' flag by comparing the text to the last saved/loaded Baseline. Idle ticks return early.
+Sub caretTimer_Tick
+	Dim c As Int = Editor.GetCaret
+	Dim len As Int = Editor.TextLength
+	If c = LastCaret And len = LastLen Then Return
+	LastCaret = c
+	LastLen = len
+	Dim curText As String = Editor.Text
+	Dim nowMod As Boolean = (curText <> Baseline)
+	If nowMod <> Modified Then SetModified(nowMod)
+	If curText <> LastHLText Then       ' content changed - re-highlight (debounced by the 150ms tick)
+		LastHLText = curText
+		Highlighter.Highlight(curText)
+	End If
+	Editor.RefreshCurrentLine           ' move the current-line highlight to the caret's line
+	UpdateStatus
+End Sub
+
+Sub UpdateStatus
+	Dim ln As Int = Editor.GetCaretLine
+	Dim col As Int = Editor.GetCaretColumn
+	Dim modFlag As String = ""
+	If Modified Then modFlag = "   modified"
+	Dim roFlag As String = ""
+	If DocReadOnly Then roFlag = "   read-only"
+	lblStatus.Text = $"Ln ${ln}, Col ${col}      ${Encoding}      ${Eol}      ${Highlighter.CurrentName}${roFlag}${modFlag}"$
+End Sub
+
+' Marks the current text as the clean baseline (called after New / Open / Save).
+Sub SetBaseline
+	Baseline = Editor.Text
+	LastLen = Editor.TextLength
+	LastCaret = Editor.GetCaret
+	SetModified(False)
+End Sub
+
+Sub SetModified (b As Boolean)
+	Modified = b
+	UpdateTitle
+	UpdateActiveTabText
+End Sub
+
+Sub UpdateTitle
+	Dim star As String = ""
+	If Modified Then star = "*"
+	MainForm.Title = star & DocName & " - " & APP_NAME
+End Sub
+#End Region
+
+#Region Helpers
+Sub DocName As String
+	If DisplayName <> "" Then Return DisplayName   ' help/shortcuts doc, etc.
+	If CurrentPath = "" Then Return "Untitled"
+	Return GetName(CurrentPath)
+End Sub
+
+Sub GetName (path As String) As String
+	Dim jf As JavaObject
+	jf.InitializeNewInstance("java.io.File", Array(path))
+	Return jf.RunMethod("getName", Null)
+End Sub
+
+Sub GetParentDir (path As String) As String
+	Dim jf As JavaObject
+	jf.InitializeNewInstance("java.io.File", Array(path))
+	Dim p As Object = jf.RunMethod("getParent", Null)
+	If p = Null Then Return ""
+	Return p
+End Sub
+
+Sub GetExt (name As String) As String
+	Dim i As Int = name.LastIndexOf(".")
+	If i = -1 Then Return ""
+	Return name.SubString(i + 1)
+End Sub
+
+#Region Encoding
+' Encoding names used in the UI: "UTF-8", "UTF-8 BOM", "UTF-16 LE", "UTF-16 BE", "ANSI".
+' Detects a byte-order mark; falls back to the configured default when none is present.
+Sub DetectEncoding (data() As Byte, fallback As String) As String
+	If data.Length >= 3 And U(data(0)) = 0xEF And U(data(1)) = 0xBB And U(data(2)) = 0xBF Then Return "UTF-8 BOM"
+	If data.Length >= 2 And U(data(0)) = 0xFF And U(data(1)) = 0xFE Then Return "UTF-16 LE"
+	If data.Length >= 2 And U(data(0)) = 0xFE And U(data(1)) = 0xFF Then Return "UTF-16 BE"
+	Return fallback
+End Sub
+
+Sub U (b As Byte) As Int
+	Return Bit.And(b, 0xFF)        ' unsigned value of a (signed) B4X byte
+End Sub
+
+' Number of BOM bytes at the start (to skip when decoding).
+Sub BomLength (data() As Byte) As Int
+	If data.Length >= 3 And U(data(0)) = 0xEF And U(data(1)) = 0xBB And U(data(2)) = 0xBF Then Return 3
+	If data.Length >= 2 And U(data(0)) = 0xFF And U(data(1)) = 0xFE Then Return 2
+	If data.Length >= 2 And U(data(0)) = 0xFE And U(data(1)) = 0xFF Then Return 2
+	Return 0
+End Sub
+
+Sub DecodeBytes (data() As Byte, enc As String) As String
+	Dim off As Int = BomLength(data)
+	Return BytesToString(data, off, data.Length - off, CharsetFor(enc))
+End Sub
+
+' Encodes text to bytes for the given encoding, prepending a BOM where the encoding calls for one.
+Sub EncodeText (text As String, enc As String) As Byte()
+	Dim body() As Byte = text.GetBytes(CharsetFor(enc))
+	Dim bom() As Byte = BomBytes(enc)
+	If bom.Length = 0 Then Return body
+	Dim out(bom.Length + body.Length) As Byte
+	Dim i As Int
+	For i = 0 To bom.Length - 1
+		out(i) = bom(i)
+	Next
+	For i = 0 To body.Length - 1
+		out(bom.Length + i) = body(i)
+	Next
+	Return out
+End Sub
+
+' Maps a UI encoding name to a Java charset.
+Sub CharsetFor (enc As String) As String
+	Select enc
+		Case "UTF-8", "UTF-8 BOM"
+			Return "UTF-8"
+		Case "UTF-16 LE"
+			Return "UTF-16LE"
+		Case "UTF-16 BE"
+			Return "UTF-16BE"
+	End Select
+	Return "UTF-8"
+End Sub
+
+' BOM bytes for an encoding (empty when none) - derived by encoding the U+FEFF BOM char.
+Sub BomBytes (enc As String) As Byte()
+	Dim mark As String = Chr(0xFEFF)        ' U+FEFF; Chr returns a Char, so hold it as a String
+	Select enc
+		Case "UTF-8 BOM"
+			Return mark.GetBytes("UTF-8")
+		Case "UTF-16 LE"
+			Return mark.GetBytes("UTF-16LE")
+		Case "UTF-16 BE"
+			Return mark.GetBytes("UTF-16BE")
+	End Select
+	Dim empty(0) As Byte
+	Return empty
+End Sub
+
+' The encoding names offered in the Setup combos. All non-default encodings carry a BOM, so they
+' are detected automatically on open (no per-file memory needed).
+Sub EncodingNames As List
+	Return Array As String("UTF-8", "UTF-8 BOM", "UTF-16 LE", "UTF-16 BE")
+End Sub
+#End Region
+
+' Writes the theme (editor colors + syntax-highlight palette) to a real temp file and points CssUri
+' at it. (DirAssets is virtual in Release, so a CSS stylesheet needs a real file URI.) Each call uses
+' a fresh filename so re-attaching the stylesheet actually reloads (JavaFX caches by URL).
+Sub InstallTheme
+	mThemeCounter = mThemeCounter + 1
+	Dim css As String = BuildThemeCss(SettingTheme)
+	Dim fname As String = "syntax" & mThemeCounter & ".css"
+	File.WriteString(File.DirTemp, fname, css)
+	Dim path As String = File.Combine(File.DirTemp, fname)
+	CssUri = "file:///" & path.Replace("\", "/")
+End Sub
+
+' Switches theme: rewrite the stylesheet and re-point every open editor at it.
+Public Sub SetTheme (t As String)
+	SettingTheme = t
+	InstallTheme
+	For Each d As Document In Documents
+		d.editor.SetStylesheet(CssUri)
+	Next
+	fhelper.SetSceneStylesheet(CssUri)   ' editor/token rules
+	ApplyChromeBase                       ' menu/tabs/controls/popups
+	SaveSettings
+End Sub
+
+' Sets modena's base colors as an INLINE style on the scene root, so all chrome (menu bar, tabs,
+' buttons, fields, combos) re-derives. Doing this on the node - rather than a `.root` CSS rule on the
+' scene - keeps combo/menu popups (which live in their own scene) resolving looked-up colors cleanly
+' through the node parent chain; a competing `.root` rule there triggers modena CssStyleHelper warnings.
+Sub ApplyChromeBase
+	If SettingTheme = "Dark" Then
+		MainForm.RootPane.Style = "-fx-base: #3c3f41; -fx-background: #2d2f31; -fx-control-inner-background: #313335; -fx-accent: #4b6eaf;"
+	Else
+		MainForm.RootPane.Style = "-fx-base: #ececec; -fx-background: #f4f4f4; -fx-control-inner-background: #ffffff; -fx-accent: #0096c9;"
+	End If
+End Sub
+
+' Returns the full CSS for a theme: editor background, default text, gutter, caret, selection, and
+' the token palette (keyword/string/char/number/comment/annotation).
+Sub BuildThemeCss (theme As String) As String
+	Dim bg, fg, kw, str, num, cmt, ann, typ, gbg, gfg, caret, sel, curline As String
+	If theme = "Dark" Then
+		bg = "#1e1e1e" : fg = "#d4d4d4"
+		kw = "#569cd6" : str = "#ce9178" : num = "#b5cea8" : cmt = "#6a9955" : ann = "#dcdcaa" : typ = "#4ec9b0"
+		gbg = "#2b2b2b" : gfg = "#858585" : caret = "#d4d4d4" : sel = "#264f78" : curline = "#2a2d2e"
+	Else
+		bg = "#ffffff" : fg = "#1e1e1e"
+		kw = "#0000ff" : str = "#a31515" : num = "#098658" : cmt = "#008000" : ann = "#808000" : typ = "#267f99"
+		gbg = "#f0f0f0" : gfg = "#999999" : caret = "#1e1e1e" : sel = "#b5d5ff" : curline = "#eef3fb"
+	End If
+	Return $".code-area{-fx-background-color:${bg};}"$ _
+		& $".code-area .text{-fx-fill:${fg};}"$ _
+		& $".current-line{-fx-background-color:${curline};}"$ _
+		& $".lineno{-fx-background-color:${gbg};-fx-text-fill:${gfg};}"$ _
+		& $".caret{-fx-stroke:${caret};}"$ _
+		& $".selection{-fx-fill:${sel};}"$ _
+		& $".code-area .text.keyword{-fx-fill:${kw};-fx-font-weight:bold;}"$ _
+		& $".code-area .text.type{-fx-fill:${typ};}"$ _
+		& $".code-area .text.string{-fx-fill:${str};}.code-area .text.char{-fx-fill:${str};}"$ _
+		& $".code-area .text.number{-fx-fill:${num};}"$ _
+		& $".code-area .text.comment{-fx-fill:${cmt};-fx-font-style:italic;}"$ _
+		& $".code-area .text.annotation{-fx-fill:${ann};}"$
+End Sub
+#End Region

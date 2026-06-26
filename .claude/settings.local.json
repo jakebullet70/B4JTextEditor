@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__b4j__b4j_get_library_docs",
+      "mcp__b4j__b4j_create_module",
+      "mcp__b4j__b4j_write_layout"
+    ]
+  }
+}
