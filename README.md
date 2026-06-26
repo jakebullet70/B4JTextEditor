@@ -4,7 +4,9 @@ A full-featured programmer's text editor for the desktop, inspired by Microsoft
 [`edit`](https://github.com/microsoft/edit). Clean, native desktop styling with multi-document
 tabs, syntax highlighting, find/replace, and per-document encoding control.  
 
-B4J programmers can learn from it, take and use any code they want.  
+B4J programmers can learn from it, take and use any code they want.   
+<img width="1145" height="856" alt="image" src="https://github.com/user-attachments/assets/dafc24b9-2c5a-40ed-9cef-bb701f096b69" />
+
 
 ## Overview
 
