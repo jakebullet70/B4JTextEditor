@@ -1,20 +1,18 @@
 # B4JEditor
 
-A full-featured programmer's text editor for the desktop, inspired by Microsoft
+A full-featured programmer's text editor for the desktop, inspired by the simple Microsoft
 [`edit`](https://github.com/microsoft/edit). Clean, native desktop styling with multi-document
 tabs, syntax highlighting, find/replace, and per-document encoding control.  
 
-B4J programmers can learn from it, take and use any code they want.   
+B4J programmers can learn from it, take and use any code they want. 
+
+  
 <img width="1145" height="856" alt="image" src="https://github.com/user-attachments/assets/dafc24b9-2c5a-40ed-9cef-bb701f096b69" />
 
 
 ## Overview
 
-B4JEditor is a JavaFX desktop application written in **B4J** (B4X / Basic4Java). The editing
-surface is built on the **RichTextFX `CodeArea`** — a virtualized, gutter-aware text component —
-giving it a line-number gutter, smooth scrolling over large files, and regex-driven syntax
-highlighting. The entire UI is constructed in code (no `.bjl` layout file) on a JavaFX
-`AnchorPane`, and the whole window chrome is themeable (Light/Dark) by overriding JavaFX's modena
+B4JEditor is a JavaFX desktop application written in **B4J** (B4X). The editing surface is built on the **RichTextFX `CodeArea`** — a virtualized, gutter-aware text component — giving it a line-number gutter, smooth scrolling over large files, and regex-driven syntax highlighting. The entire UI is constructed in code (no `.bjl` layout file) on a JavaFX `AnchorPane`, and the whole window chrome is themeable (Light/Dark) by overriding JavaFX's modena
 looked-up colors.
 
 ## Features
@@ -53,7 +51,7 @@ looked-up colors.
 
 `jcore`, `jfx`, `jxui`, `javaobject`.
 
-## Java JARs used
+## Java JARs used 
 
 | JAR | Version | Purpose |
 | --- | --- | --- |
@@ -63,5 +61,5 @@ looked-up colors.
 | wellbehavedfx | 0.3.3 | Event-handler / key-binding support for RichTextFX |
 | reactfx | 2.0-M5 | Reactive event streams used by RichTextFX |
 
-See Libs-Jars folder  
+See Libs-Jars folder  (B4J programmers add to external libs folder)  
 
